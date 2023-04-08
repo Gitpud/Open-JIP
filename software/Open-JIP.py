@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>
 
 # For more information contact: harvey_bates@hotmail.com
+
 import sys
 import csv
 import glob
@@ -22,9 +23,7 @@ import serial
 import time
 import datetime
 from time import strftime
-import plotly
 import plotly.graph_objects as go
-import csv
 import atexit
 
 usb_baudrate = 115200  # Baudrate to match Teensy
@@ -32,10 +31,10 @@ fileName = "Open-JIP_Data.csv"  # Filename of output .csv file
 fo_pos = 3
 
 def serial_ports():
-        # List serial ports available on each OS
-        # For windows OS
+    # List serial ports available on each OS
+    # For windows OS
     if sys.platform.startswith('win'):
-        ports = ['COM%s' % (i + 1) for i in range(256)]
+        ports = [f'COM{i + 1}' for i in range(256)]
     # For linux OS
     elif sys.platform.startswith('linux') or sys.platform.startswith('cygwin'):
         ports = glob.glob('/dev/tty[A-Za-z]*')
@@ -44,185 +43,132 @@ def serial_ports():
         ports = glob.glob('/dev/tty.*')
     else:
         raise EnvironmentError('Unsupported platform')
-    result = []
-    for port in ports:
-        try:
-            s = serial.Serial(port)
-            s.close()
-            if("Bluetooth" not in port):  # Excludes bluetooth port on Mac OS
-                result.append(port)
-        except (OSError, serial.SerialException):
-            pass
-    if(len(result) == 0):
-        raise IndexError("No USB devices found. Ensure Open-JIP is pugged in.")
-    else:
-        return result
 
+    result = [port for port in ports if not any(x in port for x in ['Bluetooth'])]
+
+    if not result:
+        raise IndexError("No USB devices found. Ensure Open-JIP is plugged in.")
+    return result
 
 def connect(portAddress):
-        # Connect to the Open-JIP fluorometer (Teensy Microcontroller)
+    # Connect to the Open-JIP fluorometer (Teensy Microcontroller)
     global openJIP
-    if(len(portAddress) > 1 and type(portAddress) is not str):
+    if len(portAddress) > 1 and not isinstance(portAddress, str):
         print("Which port do you want to connect to:")
-        for i in range(len(portAddress)):
-            print("\t{}. {}".format(i, portAddress[i]))
-        portID = input("Port number: ")
-        portID = int(portID)
-        print("Port {} selected.".format(portAddress[portID]))
+        for i, port in enumerate(portAddress):
+            print(f"\t{i}. {port}")
+        portID = int(input("Port number: "))
+        print(f"Port {portAddress[portID]} selected.")
     else:
         portID = 0
-    openJIP = serial.Serial(
-        portAddress[portID], usb_baudrate)  # Connect to Teensy
-    if(openJIP.is_open):
-        print("Connected to Open-JIP fluorometer.")
-    else:
-        print("Open-JIP USB device not found.")
+
+    openJIP = serial.Serial(portAddress[portID], usb_baudrate) # Connect to Teensy
+    print("Connected to Open-JIP fluorometer." if openJIP.is_open else "Open-JIP USB device not found.")
 
 def set_gain():
     gain = input("Set the detection gain: (1 (Lowest) - 4 (Highest))")
-    if(int(gain) > 0 and int(gain) <= 4):
+    if 1 <= int(gain) <= 4:
         openJIP.flush()
         time.sleep(0.2)
-        message = "F" + gain + "\n"
-        openJIP.write(bytes(message.encode('utf-8')))
-        print("Gain set to: {}".format(gain))
+        openJIP.write(f'F{gain}\n'.encode('utf-8'))
+        print(f"Gain set to: {gain}")
     else:
         print("Invalid detection gain. Default settings will be used.")
 
 def set_intensity():
     intensity = input("Set the actinic LED intensity: (1 (Lowest) - 4 (Highest))")
-    if(int(intensity) > 0 and int(intensity) <= 4):
+    if 1 <= int(intensity) <= 4:
         openJIP.flush()
         time.sleep(0.2)
-        message = "A" + intensity + "\n"
-        openJIP.write(bytes(message.encode('utf-8')))
-        print("Actinic intensity set to: {}".format(intensity))
+        openJIP.write(f'A{intensity}\n'.encode('utf-8'))
+        print(f"Actinic intensity set to: {intensity}")
     else:
-        print("Invalid actinic intensity. Default settings will be used.") 
+        print("Invalid actinic intensity. Default settings will be used.")
 
 def measure_fluorescence(readLength):
     # Read fluorescence and create two arrays of corresponding values
     print("Measuring fluorescence, please wait...")
-    openJIP.flush()  # Clear serial bus
-    time.sleep(1)  # Wait for bus to be cleared
-    openJIP.write(b'MF')  # Send byte command to Teensy
-    timeStamps = []  # Create array to hold timeStamp
-    fluorescenceValues = []  # Create array to hold data
-    for _ in range(readLength):
-        line = openJIP.readline()  # Read line from Teensy serial bus
-        # Decde data from serial bus
-        decodedLine = str(line[0:len(line) - 2].decode("utf-8"))
-        # Split into time and values
-        splitLine = [float(s) for s in decodedLine.split("\t")]
-        timeStamps.append(splitLine[0])
-        fluorescenceValues.append(float(splitLine[1]))
+    openJIP.flush() # Clear serial buffer
+    time.sleep(1) # Wait for Teensy to reset
+    openJIP.write(b'MF') # Send command to Teensy to start measuring fluorescence
+    timeStamps, fluorescenceValues = zip(*[tuple(map(float, openJIP.readline().decode("utf-8").strip().split("\t"))) for _ in range(readLength)]) # Read fluorescence values from Teensy
     print("Transient captured.")
-    # Return arrays to be passed into csv upload function
-    return timeStamps, fluorescenceValues
-
+    return timeStamps, fluorescenceValues # Return two arrays to be passed into csv upload function
 
 def calculate_parameters(fluorescenceValues, timeStamps):
+    # Calculate fluorescence parameters
     fo = fluorescenceValues[fo_pos]
     fm = max(fluorescenceValues[2:])
     fj_found = False
     fi_found = False
 
-    for i in range(len(fluorescenceValues)):
-        if(not fj_found and int(timeStamps[i]) == 2):
-            fj = fluorescenceValues[i]
-            fj_time = timeStamps[i]
+    for i, t in enumerate(timeStamps):
+        if not fj_found and int(t) == 2:
+            fj, fj_time = fluorescenceValues[i], t
             fj_found = True
-        elif(not fi_found and int(timeStamps[i]) == 30):
-            fi = fluorescenceValues[i]
-            fi_time = timeStamps[i]
-            fi_found = True
-    
-    fv = (fm - fo)
-    quantumYield = fv / fm
-    
-    print("Fo: {}".format(fo))
-    print("Fj: {} at {}".format(fj, fj_time))
-    print("Fi: {} at {}".format(fi, fi_time))
-    print("Fm: {}". format(fm))
-    print("Fv: {}".format(fv))
-    print("Quantum yield: {}".format(round(quantumYield, 3)))
+        elif not fi_found and int(t) == 30:
+                       fi, fi_time = fluorescenceValues[i], t
+        fi_found = True
 
+    fv = fm - fo
+    quantumYield = fv / fm
+
+    print(f"Fo: {fo}\nFj: {fj} at {fj_time}\nFi: {fi} at {fi_time}\nFm: {fm}\nFv: {fv}\nQuantum yield: {round(quantumYield, 3)}")
 
 def upload(timeStamps, fluorescenceValues):
-    # Upload data from fluorescence reading to .csv file with time stamp
-    print("Uploading to {}, please wait...".format(fileName))
-    # Join array into a single string seperated by a comma
-    timeStamps = ", ".join(str(x) for x in timeStamps)
-    # Same as above for the values
-    fluorescenceValues = ", ".join(str(x) for x in fluorescenceValues)
+    # Upload fluorescence data to .csv file
+    print(f"Uploading to {fileName}, please wait...")
+    currentTime = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S") # Get current time
+    
     with open(fileName, 'a') as f:
-        try:
-            writer = csv.writer(f)
-            currentTime = str(datetime.datetime.now().strftime(
-                "%Y/%m/%d %H:%M:%S"))  # Get current time for csv
-            # Upload data to a single row
-            writer.writerow([currentTime, timeStamps, fluorescenceValues])
-            print("Data written to {}.".format(fileName))
-
-        except:
-            print("Failed to write data to {}.".format(fileName))
-    f.close()
-
+        writer = csv.writer(f)
+        writer.writerow([currentTime, ", ".join(map(str, timeStamps)), ", ".join(map(str, fluorescenceValues))]) # Write data to .csv file
+        print(f"Data written to {fileName}.")
 
 def query_user_plot():
-    # Get an input from the user to determine if they want to plot the data
-    plotData = input(
-        "Would you like to plot data from {}? (y/n)".format(fileName))
-    if(plotData == "Y" or plotData == "y"):
-        get_data_from_csv(fileName)
+    # Ask user if they want to plot data
+    plotData = input(f"Would you like to plot data from {fileName}? (y/n)")
+
+    if plotData.lower() == "y":
         readTimes, timeStamps, fluorescenceValues = get_data_from_csv(fileName)
         plot_transients(readTimes, timeStamps, fluorescenceValues)
     else:
         print("Exiting.")
 
-
 def get_data_from_csv(fileName):
-    # Read the csv file and create arrays of values
-    readTimes = []
-    timeStamps = []
-    fluorescenceValues = []
+    # Get data from .csv file
+    readTimes, timeStamps, fluorescenceValues = [], [], []
+
     with open(fileName, 'r') as f:
-        reader = csv.reader(f)
-        for row in reader:
+        for row in csv.reader(f):
             if row:
-                readTimes.append(row[0][11:]) # Get the date/time stamp
+                readTimes.append(row[0][11:])
                 timeStamps.append([float(s) for s in row[1].split(',')])
-                fluorescenceValues.append([float(s)
-                                           for s in row[2].split(',')])
+                fluorescenceValues.append([float(s) for s in row[2].split(',')])
             else:
-                raise IndexError("No data found in {}.".format(fileName))
-    f.close()
+                raise IndexError(f"No data found in {fileName}.")
     return readTimes, timeStamps, fluorescenceValues
 
-
 def plot_transients(readTimes, timeStamps, fluorescenceValues):
-    # Plot data from all the transients found in the csv file
-    print("Plotting data from {}, please wait...".format(fileName))
-    updatemenus = list([
-        dict(active=1,
-             buttons=list([
-                 dict(label='Logarithmic Scale',
-                      method='update',
-                      args=[{'visible': [True, True]},
-                            {'xaxis': {'type': 'log'}}]),
-                 dict(label='Linear Scale',
-                      method='update',
-                      args=[{'visible': [True, True]},
-                            {'xaxis': {'type': 'linear'}}])
-             ]),
-             )
-    ])
+    # Plot fluorescence transients
+    print(f"Plotting data from {fileName}, please wait...")
 
-    data = []
-    for index, (readTime, times, values) in enumerate(zip(readTimes, timeStamps, fluorescenceValues)):
-        data.append(go.Scatter(x=times, y=values, mode='markers',
-                               name="Transient{} at {}".format(index+1, readTime)))
-    layout = dict(updatemenus=updatemenus, title='Open-JIP Transients')
+    updatemenus = [{
+        'active': 1,
+        'buttons': [{
+            'label': 'Logarithmic Scale',
+            'method': 'update',
+            'args': [{'visible': [True, True]}, {'xaxis': {'type': 'log'}}]
+        }, {
+            'label': 'Linear Scale',
+            'method': 'update',
+            'args': [{'visible': [True, True]}, {'xaxis': {'type': 'linear'}}]
+        }]
+    }]
+
+    data = [go.Scatter(x=times, y=values, mode='markers', name=f"Transient{index+1} at {readTime}") for index, (readTime, times, values) in enumerate(zip(readTimes, timeStamps, fluorescenceValues))]
+    
+    layout = {'updatemenus': updatemenus, 'title': 'Open-JIP Transients'}
     fig = go.Figure(data=data, layout=layout)
     fig.update_xaxes(title_text="Time (ms)")
     fig.update_yaxes(title_text="Fluorescence (V)")
@@ -230,7 +176,7 @@ def plot_transients(readTimes, timeStamps, fluorescenceValues):
     fig.show()
 
 def close():
-    if(openJIP.is_open):
+    if openJIP.is_open:
         openJIP.close()
         print("Exited cleanly.")
 
@@ -239,16 +185,15 @@ atexit.register(close)
 if __name__ == "__main__":
     port = serial_ports()
     connect(port)
-    measure = input("Do you want measure an OJIP curve now? (y/n)")
-    if(measure == "y" or measure == "Y"):
-        # Takes the length of the corresponding array in the Teensy script
+    measure = input("Do you want to measure an OJIP curve now? (y/n)")
+    if measure.lower() == "y":
         adjust = input("Set gain and actinic intensity? (y/n)")
-        if(adjust == "y" or adjust == "Y"):
+    if adjust.lower() == "y":
             set_intensity()
             set_gain()
-        timeStamps, fluorescenceValues = measure_fluorescence(2000)
-        calculate_parameters(fluorescenceValues, timeStamps)
-        upload(timeStamps, fluorescenceValues)
-        query_user_plot()
-    else:
-        print("Exiting...")
+    timeStamps, fluorescenceValues = measure_fluorescence(2000)
+    calculate_parameters(fluorescenceValues, timeStamps)
+    upload(timeStamps, fluorescenceValues)
+    query_user_plot()
+else:
+    print("Exiting...")
